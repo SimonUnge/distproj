@@ -32,7 +32,7 @@ initialize() ->
 %% the values of the global variable a, b, c and d 
 server_loop(ClientList,StorePid) ->
     receive
-	{login, MM, Client} -> 
+	{login, MM, Client} ->
 	    MM ! {ok, self()},
 	    io:format("New client has joined the server:~p.~n", [Client]),
 	    StorePid ! {print, self()},
@@ -41,10 +41,10 @@ server_loop(ClientList,StorePid) ->
 	    io:format("Client~p has left the server.~n", [Client]),
 	    StorePid ! {print, self()},
 	    server_loop(remove_client(Client,ClientList),StorePid);
-	{request, Client} -> 
+	{request, Client} ->
 	    Client ! {proceed, self()},
 	    server_loop(ClientList,StorePid);
-	{confirm, Client} -> 
+	{confirm, Client} ->
 	    Client ! {abort, self()},
 	    server_loop(ClientList,StorePid);
 	{action, Client, Act} ->
@@ -52,7 +52,7 @@ server_loop(ClientList,StorePid) ->
 	    server_loop(ClientList,StorePid)
     after 50000 ->
 	case all_gone(ClientList) of
-	    true -> exit(normal);    
+	    true -> exit(normal);
 	    false -> server_loop(ClientList,StorePid)
 	end
     end.
