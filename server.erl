@@ -21,39 +21,51 @@ start() ->
 initialize() ->
     process_flag(trap_exit, true),
     Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
+    ObjectTimeStamps = [{a,0,0}, {b,0,0}, {c,0,0},{d,0,0}],  % {object, writetimestamp, readtimestamp}
+    TransactionTimeStamps = [], %[{clientpid,transactionstimestamp,[dependencies],[OldObjects]},...]    
+    CurrentTimeStamp = 0,
+    Transactions = {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps},
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([],StorePid).
+    server_loop([],StorePid, Transactions).
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variable a, b, c and d 
-server_loop(ClientList,StorePid) ->
+server_loop(ClientList,StorePid, Transactions) ->
     receive
 	{login, MM, Client} ->
 	    MM ! {ok, self()},
 	    io:format("New client has joined the server:~p.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(add_client(Client,ClientList),StorePid);
+	    server_loop(add_client(Client,ClientList),StorePid, Transactions);
 	{close, Client} -> 
 	    io:format("Client~p has left the server.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(remove_client(Client,ClientList),StorePid);
+	    server_loop(remove_client(Client,ClientList),StorePid, Transactions);
 	{request, Client} ->
+	    NewTransactions = start_transaction(Client, Transactions),
 	    Client ! {proceed, self()},
-	    server_loop(ClientList,StorePid);
+	    server_loop(ClientList,StorePid, NewTransactions);
 	{confirm, Client} ->
 	    Client ! {abort, self()},
-	    server_loop(ClientList,StorePid);
+	    server_loop(ClientList,StorePid, Transactions);
 	{action, Client, Act} ->
 	    io:format("Received~p from client~p.~n", [Act, Client]),
-	    server_loop(ClientList,StorePid)
+	    case valid_action(Act, Client, Transactions) of
+		false -> Client ! {abort, self()},
+			 NewTransactions = Transactions;
+		true  ->
+		    NewTransactions = update_transaction(Act, Client, Transactions)
+	    end,
+
+	    server_loop(ClientList,StorePid, NewTransactions)
     after 50000 ->
 	case all_gone(ClientList) of
 	    true -> exit(normal);
-	    false -> server_loop(ClientList,StorePid)
+	    false -> server_loop(ClientList,StorePid, Transactions)
 	end
     end.
 
@@ -66,7 +78,28 @@ store_loop(ServerPid, Database) ->
     end.
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+start_transaction(Client, {Clock, TimeStamps, ObjectTimeStamps}) ->
+    NewClock = Clock + 1,
+    {NewClock, [{Client, NewClock, [], []} | TimeStamps], ObjectTimeStamps}.
 
+valid_action(Act, Client, {_,  TransactionTimeStamps, ObjectTimeStamps}) ->
+    {value, {_, W, R}} = get_object_timestamp(ObjectTimeStamps, Act),
+    {value, {_,Timestamp,_,_}} = get_transaction(TransactionTimeStamps, Client),
+    case Act  of
+	{read, _} ->
+	    W > Timestamp;
+	{write, _, _} ->
+	    R > Timestamp andalso W > Timestamp
+    end.
+
+get_object_timestamp(ObjectTimeStamps, {write, O, _}) ->
+    lists:keysearch(O, 1, ObjectTimeStamps).
+
+get_transaction(TransactionTimeStamp, Client) ->
+    lists:keysearch(Client, 1, TransactionTimeStamp).
+
+update_transaction(_,_,Transaction) ->
+    Transaction.
 
 %% - Low level function to handle lists
 add_client(C,T) -> [C|T].
