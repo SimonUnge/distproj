@@ -50,28 +50,53 @@ server_loop(ClientList,StorePid, Transactions) ->
 	    Client ! {proceed, self()},
 	    server_loop(ClientList,StorePid, NewTransactions);
 	{confirm, Client} ->
-	    Client ! {abort, self()},
-	    %%CHECK DEPLISTS...
-	    io:format("Transactions? ~p~n",[Transactions]),
-	    NewTransactions = end_transaction(Client, Transactions),
-	    server_loop(ClientList,StorePid, NewTransactions);
+	    case transaction_exists(Client, Transactions) of
+		true ->
+		    case can_commit(Client, Transactions) of
+			true ->
+			    io:format("Committed ~p~n",[Transactions]),
+			    NewTransactions = end_transaction(Client, Transactions),
+			    Client ! {committed, self()},
+			    server_loop(ClientList,StorePid, NewTransactions);
+			false ->
+			    io:format("Transaction aborted!"),
+			    {NewTransactions, RestoreList} = do_abort(Client, Transactions),
+			    StorePid ! {restore, RestoreList, self()},
+			    Client ! {abort, self()},
+			    server_loop(ClientList,StorePid, NewTransactions)
+		    end;
+		false -> 
+		    io:format("Unknown commit; no such transaction"),
+		    server_loop(ClientList, StorePid, Transactions)
+	    end;
 	{action, Client, Act} ->
 	    io:format("Received~p from client~p.~n", [Act, Client]),
-	    case valid_action(Act, Client, Transactions) of
-		false -> 
-		    %%ROLLBACK
-		    io:format("FALSE"),
-		    Client ! {abort, self()},
-		    server_loop(ClientList,StorePid, Transactions);
-		true  ->
-		    io:format("Valid action"),
-		    StorePid ! {Act, self()},
-		    receive
-			{Object, StorePid} ->
-			    NewTransactions = update_transaction(Act, Client, Object, Transactions),
-			    server_loop(ClientList,StorePid, NewTransactions)
-		    end
+	    case transaction_exists(Client, Transactions) of
+		true ->
+		    case valid_action(Act, Client, Transactions) of
+			false -> 
+			    io:format("Invalid action~n"),
+			    {NewTransactions, RestoreList} = do_abort(Client, Transactions),
+			    StorePid ! {restore, RestoreList, self()},
+			    Client ! {abort, self()},
+			    server_loop(ClientList,StorePid, NewTransactions);
+			true  ->
+			    io:format("Valid action~n"),
+			    StorePid ! {Act, self()},
+			    receive
+				{Object, StorePid} ->
+				    NewTransactions = update_transaction(Act, Client, Object, Transactions),
+				    server_loop(ClientList,StorePid, NewTransactions)
+			    end;
+			skip  ->
+			    io:format("Skip write thanks to Thomas~n"),
+			    server_loop(ClientList, StorePid, Transactions)
+		    end;
+		false ->
+		    io:format("No such transacion~n"),
+		    server_loop(ClientList, StorePid, Transactions)
 	    end
+		    
 
     after 50000 ->
 	case all_gone(ClientList) of
@@ -97,8 +122,17 @@ store_loop(ServerPid, Database) ->
 	    {value, OldObj} = lists:keysearch(O,1,Database),
 	    ServerPid ! {OldObj, self()},
 	    io:format("Database status after read:~n~p.~n",[Database]),
-	    store_loop(ServerPid, Database)
+	    store_loop(ServerPid, Database);
+	{restore, RestoreList, ServerPid} ->
+	    NewDatabase = restore(RestoreList, Database),
+	    store_loop(ServerPid, NewDatabase)
     end.
+
+restore([{O, V} | Rest ], Database) ->
+    NewDatabase = lists:keyreplace(O, 1, Database, {O, V}),
+    restore(Rest, NewDatabase);
+restore([], NewDatabase) ->
+    NewDatabase.
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -112,8 +146,15 @@ valid_action(Act, Client, {_,  TransactionTimeStamps, ObjectTimeStamps}) ->
     case Act  of
 	{read, _} ->
 	    W =< Timestamp;
-	{write, _, _} ->
-	    R =< Timestamp andalso W =< Timestamp
+	{write, _, _} when R =< Timestamp -> %Valid Write
+	    case W =< Timestamp of %Check Thomas write rule
+		true ->
+		    true;
+		false  -> %Skip due to Thomas write rule
+		    skip
+	    end;
+	{write, _, _} when R > Timestamp -> %Invalid Write
+	    false
     end.
 
 get_object_timestamp(ObjectTimeStamps, {write, O, _}) ->
@@ -123,6 +164,9 @@ get_object_timestamp(ObjectTimeStamps, {read, O}) ->
 
 get_transaction(TransactionTimeStamp, Client) ->
     lists:keysearch(Client, 1, TransactionTimeStamp).
+
+transaction_exists(Client, {_CurrentTimeStamp, TransactionTimeStamps, _ObjectTimeStamps}) ->
+    lists:keymember(Client, 1 , TransactionTimeStamps).
 
 update_transaction(Act, Client, Object,{CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     case Act of
@@ -159,12 +203,13 @@ end_transaction(Client, {Clock, TransactionTimeStamps, ObjectTimeStamps}) ->
     {Clock, NewTransactionTimeStamps, ObjectTimeStamps}.
 
 do_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
-    {value, {_, TimeStamp, Deptlist, Oldobj}} = get_transaction(TransactionTimeStamps, Client),
+    {value, {_, TimeStamp, _Deptlist, Oldobj}} = get_transaction(TransactionTimeStamps, Client),
     {NewObjectTimeStamps, RestoreObjList} = do_abort_filter(Oldobj, ObjectTimeStamps, TimeStamp, []),
-    %%Gå igenom deplist och uppdatera allas status osv. end_transactino????  do_commit?????
-    {{CurrentTimeStamp, TransactionTimeStamps, NewObjectTimeStamps}, RestoreObjList}.
+    NewTransactionTimeStamps = update_dept_status(TransactionTimeStamps, TimeStamp),
+    NewTransactions = end_transaction(Client, {CurrentTimeStamp, NewTransactionTimeStamps, NewObjectTimeStamps}),
+    {NewTransactions, RestoreObjList}.
 
-do_abort_filter([{OldObject, {OldO, OldWTS, OldRTS}} | Oldobj], ObjectTimeStamps,  TimeStamp, RestoreObjList)  ->
+do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamps,  TimeStamp, RestoreObjList)  ->
     {value, {O, WTS, RTS}} = lists:keysearch(OldO, 1, ObjectTimeStamps),
     case WTS =:= TimeStamp of
        true ->
@@ -176,9 +221,49 @@ do_abort_filter([{OldObject, {OldO, OldWTS, OldRTS}} | Oldobj], ObjectTimeStamps
 do_abort_filter([], ObjectTimeStamps, _, RestoreObjList) ->
     {ObjectTimeStamps, lists:reverse(RestoreObjList)}.
 
-update_dept_status([], TimeStamp) ->  
+update_dept_status([{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest], TimeStamp) -> 
+    UpdatedStatus = update_status(Status, DeptList, TimeStamp),
+    [{ClientPid, TransacitonTimeStamp, {UpdatedStatus, DeptList}, OldObjects} | update_dept_status(Rest, TimeStamp)];
+update_dept_status([], _) -> 
+    [].
+
+%%Change status to abort if dependencies exists...
+update_status(Status, DeptList, TimeStamp) ->
+    case lists:keymember(TimeStamp, 2, DeptList) of
+	true ->
+	    abort;
+	false ->
+	    Status
+    end.
+
+can_commit(Client, {_, TransactionTimeStamps, _}) ->
+    {value, {_, _, Deptlist, _}} = get_transaction(TransactionTimeStamps, Client),
+    {Status, _} = Deptlist,
+    %%Status =:= ok.
+    case Status of
+	abort ->
+	    false;
+	_ ->
+	    true
+    end.
+
+do_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
+    {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
+    NewStatus = need_sleep(Status, Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)),
+    NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {NewStatus, Deptlist}, OldObjlist}),
+    {CurrentTimeStamp,  NewTransactionTimeStamps, ObjectTimeStamps}.
     
 
+need_sleep(Status, [{_,WTS,_} | Rest], TransactionTimeStamps) ->
+    case lists:keymember(WTS, 2, TransactionTimeStamps) of
+	true ->
+	    sleep;
+	false  ->
+	    need_sleep(Status, Rest, TransactionTimeStamps)
+    end;
+need_sleep(Status, [], _) ->
+    Status.
+    
 maxx(X,  Y) when X > Y ->
     X;
 maxx(_X, Y) ->
