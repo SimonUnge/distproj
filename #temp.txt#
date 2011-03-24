@@ -1,0 +1,10 @@
+initialize() ->
+    process_flag(trap_exit, true),
+    Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
+    ObjectTimeStamps = [{a,0,0}, {b,0,0}, {c,0,0},{d,0,0}],  % {object, writetimestamp, readtimestamp}
+    TransactionTimeStamps = [],    %[{clientpid,transactionstimestamp,{ok, [dependencies]},[OldObjects]},...]    
+    CurrentTimeStamp = 0,
+    Transactions = {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps},
+    ServerPid = self(),
+    StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
+    server_loop([],StorePid, Transactions).

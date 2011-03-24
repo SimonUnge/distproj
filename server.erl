@@ -52,19 +52,8 @@ server_loop(ClientList,StorePid, Transactions) ->
 	{confirm, Client} ->
 	    case transaction_exists(Client, Transactions) of
 		true ->
-		    case can_commit(Client, Transactions) of
-			true ->
-			    io:format("Committed ~p~n",[Transactions]),
-			    NewTransactions = end_transaction(Client, Transactions),
-			    Client ! {committed, self()},
-			    server_loop(ClientList,StorePid, NewTransactions);
-			false ->
-			    io:format("Transaction aborted!"),
-			    {NewTransactions, RestoreList} = do_abort(Client, Transactions),
-			    StorePid ! {restore, RestoreList, self()},
-			    Client ! {abort, self()},
-			    server_loop(ClientList,StorePid, NewTransactions)
-		    end;
+		    NewTransactions = server_confirm(...),
+		    server_loop(ClientList, StorePid, NewTransactions);
 		false -> 
 		    io:format("Unknown commit; no such transaction"),
 		    server_loop(ClientList, StorePid, Transactions)
@@ -76,7 +65,7 @@ server_loop(ClientList,StorePid, Transactions) ->
 		    case valid_action(Act, Client, Transactions) of
 			false -> 
 			    io:format("Invalid action~n"),
-			    {NewTransactions, RestoreList} = do_abort(Client, Transactions),
+			    {NewTransactions, RestoreList, ClientAbortList} = do_abort(Client, Transactions),
 			    StorePid ! {restore, RestoreList, self()},
 			    Client ! {abort, self()},
 			    server_loop(ClientList,StorePid, NewTransactions);
@@ -221,6 +210,7 @@ do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamp
 do_abort_filter([], ObjectTimeStamps, _, RestoreObjList) ->
     {ObjectTimeStamps, lists:reverse(RestoreObjList)}.
 
+
 update_dept_status([{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest], TimeStamp) -> 
     UpdatedStatus = update_status(Status, DeptList, TimeStamp),
     [{ClientPid, TransacitonTimeStamp, {UpdatedStatus, DeptList}, OldObjects} | update_dept_status(Rest, TimeStamp)];
@@ -278,3 +268,25 @@ remove_client(C, [H|T]) -> [H|remove_client(C,T)].
 
 all_gone([]) -> true;
 all_gone(_) -> false.
+
+
+
+server_confirm(Client, Transactions, StorePid) ->
+    case can_commit(Client, Transactions) of
+	true ->
+	    io:format("Committed ~p~n",[Transactions]),
+	    NewTransactions = end_transaction(Client, Transactions),
+	    Client ! {committed, self()},
+	    NewTransactions;
+	false ->
+	    server_abort(Client, Transactions, StorePid)
+    end.
+
+server_abort(Client, Transactions, StorePid) ->
+    io:format("Transaction aborted!"),
+    {NewTransactions, RestoreList} = do_abort(Client, Transactions),
+    StorePid ! {restore, RestoreList, self()},
+    Client ! {abort, self()},
+    NewTransactions.
+
+check_abort([{ClientPid,_,{abort,_},_} | Rest])
