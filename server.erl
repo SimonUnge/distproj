@@ -175,6 +175,8 @@ do_abort_filter([{OldObject, {OldO, OldWTS, OldRTS}} | Oldobj], ObjectTimeStamps
     end;
 do_abort_filter([], ObjectTimeStamps, _, RestoreObjList) ->
     {ObjectTimeStamps, lists:reverse(RestoreObjList)}.
+
+update_dept_status([], TimeStamp) ->  
     
 
 maxx(X,  Y) when X > Y ->
