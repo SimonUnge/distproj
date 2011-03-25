@@ -217,7 +217,6 @@ do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamp
 do_abort_filter([], ObjectTimeStamps, _, RestoreObjList) ->
     {ObjectTimeStamps, RestoreObjList}.
 
-
 update_dept_status([{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest], TimeStamp) -> 
     UpdatedStatus = update_status(Status, DeptList, TimeStamp),
     [{ClientPid, TransacitonTimeStamp, {UpdatedStatus, DeptList}, OldObjects} | update_dept_status(Rest, TimeStamp)];
@@ -271,8 +270,7 @@ call_abort (Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePi
     call_abort(Transaction, StorePid, Rest).
 
 call_abort(Transaction = {_,TransList,_}, StorePid, TransList = [{Client, TS, {abort, _Deptlist}, _OldObjlist} | Rest]) ->
-    
-    case can_abort(Client, TransList) of
+    case can_abort(TS, TransList) of
 	true ->
 	    NewTransaction = server_abort(Client, Transaction, StorePid),
 	    call_abort(NewTransaction, StorePid);
@@ -284,9 +282,9 @@ call_abort(Transaction, StorePid, [_ | Rest]) ->
 call_abort(Transaction, _, []) ->
     Transaction.
 
-can_abort(TS, [{_ClientPid, _TStamp,{_Status, {Status,Deptlist}, _Oldlist} | TransList])->
-    can_abort1(TS, DeptList) andalso can_abort(TransList); 
-can_abort(TS, {_CurrentTimeStamp, [], _Objetimestamps})) ->
+can_abort(TS, [{_ClientPid, _TStamp, {_Status , Deptlist}, _Oldlist} | TransList])->
+    can_abort1(TS, Deptlist) andalso can_abort(TS, TransList); 
+can_abort(_, []) ->
     true.
     
 can_abort1(TS, [{_,WTS,_}|Rest]) ->
