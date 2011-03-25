@@ -52,8 +52,13 @@ server_loop(ClientList,StorePid, Transactions) ->
 	{confirm, Client} ->
 	    case transaction_exists(Client, Transactions) of
 		true ->
-		    NewTransactions = server_confirm(...),
-		    server_loop(ClientList, StorePid, NewTransactions);
+		    case should_sleep(Client, Transactions) of
+			true ->
+			    NewTransactions = do_sleep(Client, Transactions),
+			    server_loop(ClientList, StorePid, NewTransactions);
+			false ->
+			    NewTransactions = server_confirm(ClientList, StorePid, Transactions),
+			    server_loop(ClientList, StorePid, NewTransactions);
 		false -> 
 		    io:format("Unknown commit; no such transaction"),
 		    server_loop(ClientList, StorePid, Transactions)
@@ -239,20 +244,33 @@ can_commit(Client, {_, TransactionTimeStamps, _}) ->
 
 do_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
-    NewStatus = need_sleep(Status, Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)),
-    NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {NewStatus, Deptlist}, OldObjlist}),
+    %%NewStatus = need_sleep(Status, Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)),
+    NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {sleep, Deptlist}, OldObjlist}),
     {CurrentTimeStamp,  NewTransactionTimeStamps, ObjectTimeStamps}.
-    
 
-need_sleep(Status, [{_,WTS,_} | Rest], TransactionTimeStamps) ->
+wake( Transaction = {CurrentTimeStamp,  Rest, ObjectTimeStamps}, StorePid)  ->
+    wake1(Transaction = {CurrentTimeStamp,  [{Client, TS, {sleep, Deptlist}, OldObjlist} | Rest], ObjectTimeStamps}, StorePid, Rest)
+    case should_sleep(Client, Transaction ) of
+	true ->
+	    ;
+	false ->
+	    NewTransaction =  server_confirm(Client, Transaction, StorePid),
+	    
+    end
+
+should_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
+    {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
+    need_sleep(Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)).
+
+need_sleep([{_,WTS,_} | Rest], TransactionTimeStamps) ->
     case lists:keymember(WTS, 2, TransactionTimeStamps) of
 	true ->
-	    sleep;
+	    true;
 	false  ->
-	    need_sleep(Status, Rest, TransactionTimeStamps)
+	    need_sleep(Rest, TransactionTimeStamps)
     end;
-need_sleep(Status, [], _) ->
-    Status.
+need_sleep([], _) ->
+    false.
     
 maxx(X,  Y) when X > Y ->
     X;
@@ -276,6 +294,7 @@ server_confirm(Client, Transactions, StorePid) ->
 	true ->
 	    io:format("Committed ~p~n",[Transactions]),
 	    NewTransactions = end_transaction(Client, Transactions),
+	    NewerTransaction = wake(NewTransactions, StorePid),
 	    Client ! {committed, self()},
 	    NewTransactions;
 	false ->
