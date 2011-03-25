@@ -57,8 +57,10 @@ server_loop(ClientList,StorePid, Transactions) ->
 			    NewTransactions = do_sleep(Client, Transactions),
 			    server_loop(ClientList, StorePid, NewTransactions);
 			false ->
-			    NewTransactions = server_confirm(ClientList, StorePid, Transactions),
-			    server_loop(ClientList, StorePid, NewTransactions);
+			    io:format("Should Sleep false~n"),
+			    NewTransactions = server_confirm(ClientList, Transactions, StorePid),
+			    server_loop(ClientList, StorePid, NewTransactions)
+		    end;
 		false -> 
 		    io:format("Unknown commit; no such transaction"),
 		    server_loop(ClientList, StorePid, Transactions)
@@ -70,9 +72,7 @@ server_loop(ClientList,StorePid, Transactions) ->
 		    case valid_action(Act, Client, Transactions) of
 			false -> 
 			    io:format("Invalid action~n"),
-			    {NewTransactions, RestoreList, ClientAbortList} = do_abort(Client, Transactions),
-			    StorePid ! {restore, RestoreList, self()},
-			    Client ! {abort, self()},
+			    NewTransactions = server_abort(Client, Transactions, StorePid),
 			    server_loop(ClientList,StorePid, NewTransactions);
 			true  ->
 			    io:format("Valid action~n"),
@@ -232,9 +232,12 @@ update_status(Status, DeptList, TimeStamp) ->
     end.
 
 can_commit(Client, {_, TransactionTimeStamps, _}) ->
+    io:format("Start of can commit~p  ~p  ~n", [ TransactionTimeStamps, get_transaction(TransactionTimeStamps, Client)]),
     {value, {_, _, Deptlist, _}} = get_transaction(TransactionTimeStamps, Client),
+    io:format("Just before ...~n"),
     {Status, _} = Deptlist,
     %%Status =:= ok.
+    io:format("Inside can commit, before case...~n"),
     case Status of
 	abort ->
 	    false;
@@ -243,27 +246,27 @@ can_commit(Client, {_, TransactionTimeStamps, _}) ->
     end.
 
 do_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
-    {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
+    {value, {Client, TS, {_Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
     %%NewStatus = need_sleep(Status, Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)),
     NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {sleep, Deptlist}, OldObjlist}),
     {CurrentTimeStamp,  NewTransactionTimeStamps, ObjectTimeStamps}.
 
 wake( Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
-    wake1(Transaction, StorePid, Rest).
+    wake(Transaction, StorePid, Rest).
 
-wake1(Transaction, StorePid, [{Client, TS, {sleep, Deptlist}, OldObjlist} | Rest])
+wake(Transaction, StorePid, [{Client, _TS, {sleep, _Deptlist}, _OldObjlist} | Rest]) ->
     case should_sleep(Client, Transaction ) of
 	true ->
-	    wake1(Transaction, StorePid, Rest);
+	    wake(Transaction, StorePid, Rest);
 	false ->
 	    NewTransaction = {_TS, NewTransactionTimeStamps, _ObjectTimeStamps} = server_confirm(Client, Transaction, StorePid),
-	    wake1(NewTransaction, StorePid, NewTransactionTimeStamps);            
-    end
-wake1(Transaction, _, []) ->
+	    wake(NewTransaction, StorePid, NewTransactionTimeStamps)
+    end;
+wake(Transaction, _, []) ->
     Transaction.
 
-should_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
-    {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
+should_sleep(Client, {_CurrentTimeStamp,  TransactionTimeStamps, _ObjectTimeStamps}) ->
+    {value, {Client, _TS, {_Status, Deptlist}, _OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
     need_sleep(Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)).
 
 need_sleep([{_,WTS,_} | Rest], TransactionTimeStamps) ->
@@ -294,14 +297,16 @@ all_gone(_) -> false.
 
 
 server_confirm(Client, Transactions, StorePid) ->
+    io:format("Serverconfirm transactions~p~n", [Transactions]),
     case can_commit(Client, Transactions) of
 	true ->
 	    io:format("Committed ~p~n",[Transactions]),
 	    NewTransactions = end_transaction(Client, Transactions),
-	    NewerTransaction = wake(NewTransactions, StorePid),
+	    NewerTransactions = wake(NewTransactions, StorePid),
 	    Client ! {committed, self()},
-	    NewTransactions;
+	    NewerTransactions;
 	false ->
+	    io:format("Inside server confirm false"),
 	    server_abort(Client, Transactions, StorePid)
     end.
 
@@ -312,4 +317,4 @@ server_abort(Client, Transactions, StorePid) ->
     Client ! {abort, self()},
     NewTransactions.
 
-check_abort([{ClientPid,_,{abort,_},_} | Rest])
+%%check_abort([{ClientPid,_,{abort,_},_} | Rest])
