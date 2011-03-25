@@ -151,14 +151,14 @@ valid_action(Act, Client, {_,  TransactionTimeStamps, ObjectTimeStamps}) ->
         false
     end.
 
-set_client_status(Client, Status, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps})
+set_client_status(Client, Status, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
          {value, {Client, TimeStamp, {_, Deptlist}, Oldobj}} = get_transaction(TransactionTimeStamps, Client),
           NewTransactionTimeStamps = lists:keyreplace(
                       Client,
                       1,
                       TransactionTimeStamps,
                       {Client, TimeStamp, {Status,Deptlist}, Oldobj}),
-         {CurrentTimeStamp, NewTransactionTimeStamps, ObjectTimeStamps};
+         {CurrentTimeStamp, NewTransactionTimeStamps, ObjectTimeStamps}.
 
 get_object_timestamp(ObjectTimeStamps, {write, O, _}) ->
     lists:keysearch(O, 1, ObjectTimeStamps);
@@ -205,11 +205,15 @@ end_transaction(Client, {Clock, TransactionTimeStamps, ObjectTimeStamps}) ->
     NewTransactionTimeStamps = lists:keydelete(Client, 1, TransactionTimeStamps),
     {Clock, NewTransactionTimeStamps, ObjectTimeStamps}.
 
+init_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
+    {value, {_, TimeStamp, _Deptlist, _Oldobj}} = get_transaction(TransactionTimeStamps, Client),
+    NewTransactionTimeStamps = update_dept_status(TransactionTimeStamps, TimeStamp),
+    {CurrentTimeStamp, NewTransactionTimeStamps, ObjectTimeStamps}.
+
 do_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {_, TimeStamp, _Deptlist, Oldobj}} = get_transaction(TransactionTimeStamps, Client),
     {NewObjectTimeStamps, RestoreObjList} = do_abort_filter(Oldobj, ObjectTimeStamps, TimeStamp, []),
-    NewTransactionTimeStamps = update_dept_status(TransactionTimeStamps, TimeStamp),
-    NewTransactions = end_transaction(Client, {CurrentTimeStamp, NewTransactionTimeStamps, NewObjectTimeStamps}),
+    NewTransactions = end_transaction(Client, {CurrentTimeStamp, TransactionTimeStamps, NewObjectTimeStamps}),
     {NewTransactions, lists:reverse(RestoreObjList)}.
 
 do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamps,  TimeStamp, RestoreObjList)  ->
@@ -290,6 +294,7 @@ call_abort(Transaction, _, []) ->
     Transaction.
 
 can_abort_client(Client, {_,TransList,_}) ->
+    {value, {Client, TS, {_Status, _Deptlist}, _OldObjlist}} = get_transaction(TransList, Client),
     can_abort(TS, TransList).
     
 
@@ -346,9 +351,10 @@ server_confirm(Client, Transactions, StorePid) ->
         server_abort(Client, Transactions, StorePid)
     end.
 
-server_abort(Client, Transactions, StorePid) ->
+server_abort(Client, ATransactions, StorePid) ->
     io:format("Transaction aborted!"),
-    case can_abort_client(Client, Transaction) of
+    Transactions = init_abort(Client, ATransactions),
+    case can_abort_client(Client, Transactions) of
         true ->
             {NewTransactions, RestoreList} = do_abort(Client, Transactions),
             StorePid ! {restore, RestoreList, self()},
@@ -357,10 +363,8 @@ server_abort(Client, Transactions, StorePid) ->
             EvenNewerTransactions = wake(NewerTransactions, StorePid),
             EvenNewerTransactions;
         false ->
-            NewTransactions = set_client_status(Client, abort, Transactions).
+            NewTransactions = set_client_status(Client, abort, Transactions),
             NewerTransactions = call_abort(NewTransactions, StorePid),
             EvenNewerTransactions = wake(NewerTransactions, StorePid),
-            EvenNewerTransactions;
+            EvenNewerTransactions
     end.
-
-%%check_abort([{ClientPid,_,{abort,_},_} | Rest])
