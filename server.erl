@@ -54,11 +54,12 @@ server_loop(ClientList,StorePid, Transactions) ->
 		true ->
 		    case should_sleep(Client, Transactions) of
 			true ->
+			    io:format("NOW I AM SLEEEEEEEPING!!!!!!!!~n"),
 			    NewTransactions = do_sleep(Client, Transactions),
 			    server_loop(ClientList, StorePid, NewTransactions);
 			false ->
 			    io:format("Should Sleep false~n"),
-			    NewTransactions = server_confirm(ClientList, Transactions, StorePid),
+			    NewTransactions = server_confirm(Client, Transactions, StorePid),
 			    server_loop(ClientList, StorePid, NewTransactions)
 		    end;
 		false -> 
@@ -123,6 +124,7 @@ store_loop(ServerPid, Database) ->
     end.
 
 restore([{O, V} | Rest ], Database) ->
+    io:format("NEED TO RESTORE O:~p  V:~p ~n", [O, V]),
     NewDatabase = lists:keyreplace(O, 1, Database, {O, V}),
     restore(Rest, NewDatabase);
 restore([], NewDatabase) ->
@@ -201,7 +203,7 @@ do_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     {NewObjectTimeStamps, RestoreObjList} = do_abort_filter(Oldobj, ObjectTimeStamps, TimeStamp, []),
     NewTransactionTimeStamps = update_dept_status(TransactionTimeStamps, TimeStamp),
     NewTransactions = end_transaction(Client, {CurrentTimeStamp, NewTransactionTimeStamps, NewObjectTimeStamps}),
-    {NewTransactions, RestoreObjList}.
+    {NewTransactions, lists:reverse(RestoreObjList)}.
 
 do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamps,  TimeStamp, RestoreObjList)  ->
     {value, {O, WTS, RTS}} = lists:keysearch(OldO, 1, ObjectTimeStamps),
@@ -213,7 +215,7 @@ do_abort_filter([{OldObject, {OldO, OldWTS, _OldRTS}} | Oldobj], ObjectTimeStamp
 	    do_abort_filter(Oldobj, ObjectTimeStamps,  TimeStamp, RestoreObjList)
     end;
 do_abort_filter([], ObjectTimeStamps, _, RestoreObjList) ->
-    {ObjectTimeStamps, lists:reverse(RestoreObjList)}.
+    {ObjectTimeStamps, RestoreObjList}.
 
 
 update_dept_status([{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest], TimeStamp) -> 
@@ -232,12 +234,9 @@ update_status(Status, DeptList, TimeStamp) ->
     end.
 
 can_commit(Client, {_, TransactionTimeStamps, _}) ->
-    io:format("Start of can commit~p  ~p  ~n", [ TransactionTimeStamps, get_transaction(TransactionTimeStamps, Client)]),
     {value, {_, _, Deptlist, _}} = get_transaction(TransactionTimeStamps, Client),
-    io:format("Just before ...~n"),
     {Status, _} = Deptlist,
     %%Status =:= ok.
-    io:format("Inside can commit, before case...~n"),
     case Status of
 	abort ->
 	    false;
@@ -259,11 +258,36 @@ wake(Transaction, StorePid, [{Client, _TS, {sleep, _Deptlist}, _OldObjlist} | Re
 	true ->
 	    wake(Transaction, StorePid, Rest);
 	false ->
+	    io:format("NOW I AM AWAKE AGAIN!!!!!!!! GOOOOD~n"),
 	    NewTransaction = {_TS, NewTransactionTimeStamps, _ObjectTimeStamps} = server_confirm(Client, Transaction, StorePid),
 	    wake(NewTransaction, StorePid, NewTransactionTimeStamps)
     end;
+wake(Transaction,StorePid, [_ | Rest]) ->
+    wake(Transaction, StorePid, Rest);
 wake(Transaction, _, []) ->
     Transaction.
+
+call_abort (Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
+    call_abort(Transaction, StorePid, Rest).
+
+call_abort(Transaction, StorePid, [{Client, _TS, {abort, _Deptlist}, _OldObjlist} | Rest]) ->
+    case can_abort(Client, Transaction) of
+	true ->
+	    NewTransaction = server_abort(Client, Transaction, StorePid),
+	    call_abort(NewTransaction, StorePid);
+	false ->
+	    call_abort(Transaction, StorePid, Rest)
+    end;
+call_abort(Transaction, StorePid, [_ | Rest]) ->
+    call_abort(Transaction, StorePid, Rest);
+call_abort(Transaction, _, []) ->
+    Transaction.
+
+can_abort(Client, [{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest]) -> 
+    UpdatedStatus = update_status(Status, DeptList, TimeStamp),
+    [{ClientPid, TransacitonTimeStamp, {UpdatedStatus, DeptList}, OldObjects} | update_dept_status(Rest, TimeStamp)];
+can_abort([], _) -> 
+    [].
 
 should_sleep(Client, {_CurrentTimeStamp,  TransactionTimeStamps, _ObjectTimeStamps}) ->
     {value, {Client, _TS, {_Status, Deptlist}, _OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
@@ -315,6 +339,8 @@ server_abort(Client, Transactions, StorePid) ->
     {NewTransactions, RestoreList} = do_abort(Client, Transactions),
     StorePid ! {restore, RestoreList, self()},
     Client ! {abort, self()},
-    NewTransactions.
+    NewerTransactions = call_abort(NewTransactions, StorePid),
+    EvenNewerTransactions = wake(NewerTransactions, StorePid),
+    EvenNewerTransactions.
 
 %%check_abort([{ClientPid,_,{abort,_},_} | Rest])
