@@ -270,8 +270,9 @@ wake(Transaction, _, []) ->
 call_abort (Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
     call_abort(Transaction, StorePid, Rest).
 
-call_abort(Transaction, StorePid, [{Client, _TS, {abort, _Deptlist}, _OldObjlist} | Rest]) ->
-    case can_abort(Client, Transaction) of
+call_abort(Transaction = {_,TransList,_}, StorePid, TransList = [{Client, TS, {abort, _Deptlist}, _OldObjlist} | Rest]) ->
+    
+    case can_abort(Client, TransList) of
 	true ->
 	    NewTransaction = server_abort(Client, Transaction, StorePid),
 	    call_abort(NewTransaction, StorePid);
@@ -283,11 +284,16 @@ call_abort(Transaction, StorePid, [_ | Rest]) ->
 call_abort(Transaction, _, []) ->
     Transaction.
 
-can_abort(Client, [{ClientPid, TransacitonTimeStamp, {Status, DeptList}, OldObjects} | Rest]) -> 
-    UpdatedStatus = update_status(Status, DeptList, TimeStamp),
-    [{ClientPid, TransacitonTimeStamp, {UpdatedStatus, DeptList}, OldObjects} | update_dept_status(Rest, TimeStamp)];
-can_abort([], _) -> 
-    [].
+can_abort(TS, [{_ClientPid, _TStamp,{_Status, {Status,Deptlist}, _Oldlist} | TransList])->
+    can_abort1(TS, DeptList) andalso can_abort(TransList); 
+can_abort(TS, {_CurrentTimeStamp, [], _Objetimestamps})) ->
+    true.
+    
+can_abort1(TS, [{_,WTS,_}|Rest]) ->
+    WTS =/= TS andalso can_abort1(TS, Rest);
+can_abort1(_, []) ->
+    true.
+    
 
 should_sleep(Client, {_CurrentTimeStamp,  TransactionTimeStamps, _ObjectTimeStamps}) ->
     {value, {Client, _TS, {_Status, Deptlist}, _OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
