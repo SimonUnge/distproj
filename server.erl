@@ -248,15 +248,19 @@ do_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) -
     NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {sleep, Deptlist}, OldObjlist}),
     {CurrentTimeStamp,  NewTransactionTimeStamps, ObjectTimeStamps}.
 
-wake( Transaction = {CurrentTimeStamp,  Rest, ObjectTimeStamps}, StorePid)  ->
-    wake1(Transaction = {CurrentTimeStamp,  [{Client, TS, {sleep, Deptlist}, OldObjlist} | Rest], ObjectTimeStamps}, StorePid, Rest)
+wake( Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
+    wake1(Transaction, StorePid, Rest).
+
+wake1(Transaction, StorePid, [{Client, TS, {sleep, Deptlist}, OldObjlist} | Rest])
     case should_sleep(Client, Transaction ) of
 	true ->
-	    ;
+	    wake1(Transaction, StorePid, Rest);
 	false ->
-	    NewTransaction =  server_confirm(Client, Transaction, StorePid),
-	    
+	    NewTransaction = {_TS, NewTransactionTimeStamps, _ObjectTimeStamps} = server_confirm(Client, Transaction, StorePid),
+	    wake1(NewTransaction, StorePid, NewTransactionTimeStamps);            
     end
+wake1(Transaction, _, []) ->
+    Transaction.
 
 should_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {Client, TS, {Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
