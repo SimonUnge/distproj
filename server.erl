@@ -1,3 +1,8 @@
+%%% @author Jon Borglund and Simon Unge
+%%% Created : 26 Mar 2011 by Simon Unge <simonunge@nl119-202-125.student.uu.se>
+
+%% We choosed time stamp based concurrency controll, following the algorithm linked to (wikipedia).
+
 %% - Server module
 %% - The server module creates a parallel registered process by spawning a process which
 %% evaluates initialize().
@@ -17,7 +22,7 @@ start() ->
                            Val= (catch initialize()),
                            io:format("Server terminated with:~p~n",[Val])
                        end)).
-
+%% Added a few data structures to make it work.
 initialize() ->
     process_flag(trap_exit, true),
     Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
@@ -27,74 +32,89 @@ initialize() ->
     Transactions = {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps},
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([],StorePid, Transactions).
+    server_loop([],StorePid, Transactions, []). %server_loop(ClientList, StorePid, Transactions, Seqlist)
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variable a, b, c and d
-server_loop(ClientList,StorePid, Transactions) ->
+server_loop(ClientList,StorePid, Transactions, Seqlist) ->
     receive
     {login, MM, Client} ->
         MM ! {ok, self()},
         io:format("New client has joined the server:~p.~n", [Client]),
         StorePid ! {print, self()},
-        server_loop(add_client(Client,ClientList),StorePid, Transactions);
+        server_loop(add_client(Client,ClientList),StorePid, Transactions, Seqlist);
     {close, Client} ->
         io:format("Client~p has left the server.~n", [Client]),
         StorePid ! {print, self()},
-        server_loop(remove_client(Client,ClientList),StorePid, Transactions);
+        server_loop(remove_client(Client,ClientList),StorePid, Transactions, Seqlist);
     {request, Client} ->
+	 %% Starts a new transaction, inits the sequence list.
         NewTransactions = start_transaction(Client, Transactions),
         Client ! {proceed, self()},
-        server_loop(ClientList,StorePid, NewTransactions);
-    {confirm, Client} ->
+	NewSeqlist = init_seq(Client, Seqlist),
+        server_loop(ClientList,StorePid, NewTransactions, NewSeqlist);
+    {confirm, Client, Seq} ->
         case transaction_exists(Client, Transactions) of
         true ->
-            case should_sleep(Client, Transactions) of
-            true ->
-                io:format("NOW I AM SLEEEEEEEPING!!!!!!!!~n"),
-                NewTransactions = do_sleep(Client, Transactions),
-                server_loop(ClientList, StorePid, NewTransactions);
-            false ->
-                io:format("Should Sleep false~n"),
-                NewTransactions = server_confirm(Client, Transactions, StorePid),
-                server_loop(ClientList, StorePid, NewTransactions)
-            end;
+		case is_next_in_seq(Client, Seqlist, Seq) of 
+		    true ->
+			case should_sleep(Client, Transactions) of
+			    true ->
+				io:format("Client~p sleeping.~n", [Client]),
+				NewTransactions = do_sleep(Client, Transactions),
+				server_loop(ClientList, StorePid, NewTransactions, Seqlist);
+			    false ->
+				NewTransactions = server_confirm(Client, Transactions, StorePid),
+				NewSeqlist = end_seq(Client, Seqlist),
+				server_loop(ClientList, StorePid, NewTransactions, NewSeqlist)
+			end;
+		    false ->
+			Client ! {resend, get_seq_number(Client, Seqlist), self()},
+			server_loop(ClientList, StorePid, Transactions, Seqlist)
+		end;
         false ->
             io:format("Unknown commit; no such transaction"),
-            server_loop(ClientList, StorePid, Transactions)
+            server_loop(ClientList, StorePid, Transactions, Seqlist)
         end;
-    {action, Client, Act} ->
+    {action, Client, Act, Seq} ->
         io:format("Received~p from client~p.~n", [Act, Client]),
         case transaction_exists(Client, Transactions) of
         true ->
-            case valid_action(Act, Client, Transactions) of
-            false ->
-                io:format("Invalid action~n"),
-                NewTransactions = server_abort(Client, Transactions, StorePid),
-                server_loop(ClientList,StorePid, NewTransactions);
-            true  ->
-                io:format("Valid action~n"),
-                StorePid ! {Act, self()},
-                receive
-                {Object, StorePid} ->
-                    NewTransactions = update_transaction(Act, Client, Object, Transactions),
-                    server_loop(ClientList,StorePid, NewTransactions)
-                end;
-            skip  ->
-                io:format("Skip write thanks to Thomas~n"),
-                server_loop(ClientList, StorePid, Transactions)
-            end;
+            case is_next_in_seq(Client, Seqlist, Seq) of
+		true ->
+		    NewSeqlist = increase_seq_number(Client, Seqlist),
+		    case valid_action(Act, Client, Transactions) of
+			false ->
+			    io:format("Client~p send invalid action.~n", [Client]),
+			    NewTransactions = server_abort(Client, Transactions, StorePid),
+			    server_loop(ClientList,StorePid, NewTransactions, NewSeqlist);
+			true  ->
+			    io:format("Client~p sent valid action.~n", [Client]),
+			    StorePid ! {Act, self()},
+			    receive
+				{Object, StorePid} ->
+				    NewTransactions = update_transaction(Act, Client, Object, Transactions),
+				    server_loop(ClientList,StorePid, NewTransactions, NewSeqlist)
+			    end;
+			skip  ->
+			    io:format("Skip write thanks to Thomas~n"),
+			    server_loop(ClientList, StorePid, Transactions, NewSeqlist)
+		    end;
+		false ->
+		    io:format("Bad seq number ~p~n",[Seq]),
+		    server_loop(ClientList, StorePid, Transactions, Seqlist)
+	    end;	    
         false ->
             io:format("No such transacion~n"),
-            server_loop(ClientList, StorePid, Transactions)
+            server_loop(ClientList, StorePid, Transactions, Seqlist)
         end
 
     after 50000 ->
     case all_gone(ClientList) of
         true -> exit(normal);
-        false -> server_loop(ClientList,StorePid, Transactions)
+        false -> server_loop(ClientList,StorePid, Transactions, Seqlist)
     end
     end.
 
@@ -122,7 +142,7 @@ store_loop(ServerPid, Database) ->
     end.
 
 restore([{O, V} | Rest ], Database) ->
-    io:format("NEED TO RESTORE O:~p  V:~p ~n", [O, V]),
+    io:format("Store: Restored Object ~p to  value ~p ~n", [O, V]),
     NewDatabase = lists:keyreplace(O, 1, Database, {O, V}),
     restore(Rest, NewDatabase);
 restore([], NewDatabase) ->
@@ -171,6 +191,9 @@ get_transaction(TransactionTimeStamp, Client) ->
 transaction_exists(Client, {_CurrentTimeStamp, TransactionTimeStamps, _ObjectTimeStamps}) ->
     lists:keymember(Client, 1 , TransactionTimeStamps).
 
+%% This poorly named function does crazy much.
+%% If read: update the set of dependencies DEP(Ti).add(WTS(Oj)) and set RTS(Oj) = max(RTS(Oj),TS(Ti))
+%% If write: store the previous values, OLD(Ti).add(Oj,WTS(Oj)), set WTS(Oj) = TS(Ti), and update the value of Oj.
 update_transaction(Act, Client, Object,{CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     case Act of
     {read, O} ->
@@ -205,11 +228,13 @@ end_transaction(Client, {Clock, TransactionTimeStamps, ObjectTimeStamps}) ->
     NewTransactionTimeStamps = lists:keydelete(Client, 1, TransactionTimeStamps),
     {Clock, NewTransactionTimeStamps, ObjectTimeStamps}.
 
+%% Updates the dependencies in transaction to a abort status.
 init_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {_, TimeStamp, _Deptlist, _Oldobj}} = get_transaction(TransactionTimeStamps, Client),
     NewTransactionTimeStamps = update_dept_status(TransactionTimeStamps, TimeStamp),
     {CurrentTimeStamp, NewTransactionTimeStamps, ObjectTimeStamps}.
 
+%% Terminates the transaction and gets a restore list for restore.
 do_abort(Client, {CurrentTimeStamp, TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {_, TimeStamp, _Deptlist, Oldobj}} = get_transaction(TransactionTimeStamps, Client),
     {NewObjectTimeStamps, RestoreObjList} = do_abort_filter(Oldobj, ObjectTimeStamps, TimeStamp, []),
@@ -243,10 +268,10 @@ update_status(Status, DeptList, TimeStamp) ->
         Status
     end.
 
+
 can_commit(Client, {_, TransactionTimeStamps, _}) ->
     {value, {_, _, Deptlist, _}} = get_transaction(TransactionTimeStamps, Client),
     {Status, _} = Deptlist,
-    %%Status =:= ok.
     case Status of
     abort ->
         false;
@@ -256,10 +281,10 @@ can_commit(Client, {_, TransactionTimeStamps, _}) ->
 
 do_sleep(Client, {CurrentTimeStamp,  TransactionTimeStamps, ObjectTimeStamps}) ->
     {value, {Client, TS, {_Status, Deptlist}, OldObjlist}} = get_transaction(TransactionTimeStamps, Client),
-    %%NewStatus = need_sleep(Status, Deptlist, lists:keydelete(Client, 1, TransactionTimeStamps)),
     NewTransactionTimeStamps = lists:keyreplace(Client, 1, TransactionTimeStamps, {Client, TS, {sleep, Deptlist}, OldObjlist}),
     {CurrentTimeStamp,  NewTransactionTimeStamps, ObjectTimeStamps}.
 
+%% Tries to wake up sleeping transactions
 wake( Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
     wake(Transaction, StorePid, Rest).
 
@@ -268,7 +293,6 @@ wake(Transaction, StorePid, [{Client, _TS, {sleep, _Deptlist}, _OldObjlist} | Re
     true ->
         wake(Transaction, StorePid, Rest);
     false ->
-        io:format("NOW I AM AWAKE AGAIN!!!!!!!! GOOOOD~n"),
         NewTransaction = {_TS, NewTransactionTimeStamps, _ObjectTimeStamps} = server_confirm(Client, Transaction, StorePid),
         wake(NewTransaction, StorePid, NewTransactionTimeStamps)
     end;
@@ -277,6 +301,7 @@ wake(Transaction,StorePid, [_ | Rest]) ->
 wake(Transaction, _, []) ->
     Transaction.
 
+%% Tries to abort transactions which status is abort.
 call_abort (Transaction = {_CurrentTimeStamp,  Rest, _ObjectTimeStamps}, StorePid)  ->
     call_abort(Transaction, StorePid, Rest).
 
@@ -296,8 +321,8 @@ call_abort(Transaction, _, []) ->
 can_abort_client(Client, {_,TransList,_}) ->
     {value, {Client, TS, {_Status, _Deptlist}, _OldObjlist}} = get_transaction(TransList, Client),
     can_abort(TS, TransList).
-    
 
+%%  Checks dependencies    
 can_abort(TS, [{_ClientPid, _TStamp, {_Status , Deptlist}, _Oldlist} | TransList])->
     can_abort1(TS, Deptlist) andalso can_abort(TS, TransList);
 can_abort(_, []) ->
@@ -337,6 +362,7 @@ remove_client(C, [H|T]) -> [H|remove_client(C,T)].
 all_gone([]) -> true;
 all_gone(_) -> false.
 
+%% Server checks if it is okey to confirm and commits if ok, else sleep or abort...
 server_confirm(Client, Transactions, StorePid) ->
     io:format("Serverconfirm transactions~p~n", [Transactions]),
     case can_commit(Client, Transactions) of
@@ -351,6 +377,7 @@ server_confirm(Client, Transactions, StorePid) ->
         server_abort(Client, Transactions, StorePid)
     end.
 
+%% Server checks if it is okey to abort, and also tries to abort dependencies.
 server_abort(Client, ATransactions, StorePid) ->
     io:format("Transaction aborted!"),
     Transactions = init_abort(Client, ATransactions),
@@ -368,3 +395,25 @@ server_abort(Client, ATransactions, StorePid) ->
             EvenNewerTransactions = wake(NewerTransactions, StorePid),
             EvenNewerTransactions
     end.
+
+%% SEQUENCE HANDLING for handling lost messages.
+
+init_seq(Client, Seqlist) ->
+    [{Client, 0} | end_seq(Client, Seqlist)].
+
+end_seq(Client, Seqlist) ->
+    lists:keydelete(Client, 1, Seqlist).
+
+get_seq_number(Client, Seqlist) ->
+    {value, {Client, Seqnum}} = lists:keysearch(Client, 1, Seqlist),
+    Seqnum.
+
+set_seq_number(Client, Seqlist, Seqnumber) ->
+    lists:keyreplace(Client, 1, Seqlist, {Client, Seqnumber}).
+
+is_next_in_seq(Client, Seqlist, Seqnumber) ->
+    get_seq_number(Client, Seqlist) =:= Seqnumber.
+
+increase_seq_number(Client, Seqlist) ->
+    NextSeqnumber = get_seq_number(Client, Seqlist) + 1,
+    set_seq_number(Client, Seqlist, NextSeqnumber).

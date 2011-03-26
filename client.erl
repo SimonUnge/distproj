@@ -86,28 +86,34 @@ process(Window, ServerPid, Transaction) ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end.
 
-%% - Sending the transaction and waiting for confirmation
-send(Window, ServerPid, []) ->
-    ServerPid ! {confirm, self()}, %% Once all the list (transaction) items sent, send confirmation
+%% - Sending the transaction and waiting for confirmation,
+send(Window, ServerPid, Transaction) ->
+    send(Window, ServerPid, Transaction, Transaction, 0).
+
+send(Window, ServerPid, [], Transaction, Seq) ->
+    ServerPid ! {confirm, self(), Seq}, %% Once all the list (transaction) items sent, send confirmation
     receive
 	{abort, ServerPid} -> insert_str(Window, "Aborted... type run if you want to try again!\n"),
 		       connected(Window, ServerPid);
 	{committed, ServerPid} -> insert_str(Window, "Transaction succeeded!\n"),
 			  connected(Window, ServerPid);
+	{resend, FromSeq, ServerPid} -> %The server tells us we need to resend from action seq FromSeq
+	    insert_str(Window, "Resending \n"),
+	    send(Window, ServerPid, lists:nthtail(FromSeq, Transaction), Transaction, FromSeq); %Resends all actions from FromSeq
 	{'EXIT', Window, windowDestroyed} -> end_client(ServerPid);
 	{close, ServerPid} -> 
 	    exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end;
-send(Window, ServerPid, [H|T]) -> 
+send(Window, ServerPid, [H|T], Transaction, Seq) ->
     sleep(3), 
-    case loose(0) of
+    case loose(6) of
 	%% In order to handle losses, think about adding an extra field to the message sent
-	false -> ServerPid ! {action, self(), H}; 
+	false -> ServerPid ! {action, self(), H, Seq}; 
         true -> ok
     end,
-    send(Window, ServerPid, T).
+    send(Window, ServerPid, T, Transaction, Seq + 1).
 %%%%%%%%%%%%%%%%%%%%%%% Active Window %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
